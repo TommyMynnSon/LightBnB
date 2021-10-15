@@ -96,10 +96,12 @@ exports.addUser = addUser;
  */
 const getAllReservations = function(guest_id, limit = 10) {
   const queryString = `
-  SELECT reservations.*, properties.*
+  SELECT reservations.*, properties.*, AVG(property_reviews.rating) AS average_rating
   FROM reservations
   JOIN properties ON reservations.property_id = properties.id
+  JOIN property_reviews ON properties.id = property_reviews.property_id
   WHERE reservations.guest_id = $1 AND reservations.start_date != now()::date
+  GROUP BY properties.id, reservations.id
   ORDER BY reservations.start_date
   LIMIT $2;
   `;
@@ -122,21 +124,100 @@ exports.getAllReservations = getAllReservations;
  * @return {Promise<[{}]>}  A promise to the properties.
  */
 const getAllProperties = function(options, limit = 10) {
-  const queryString = `
-  SELECT *
+  const queryParams = [];
+
+  let queryString = `
+  SELECT properties.*, AVG(property_reviews.rating) as average_rating
   FROM properties
-  LIMIT $1
+  JOIN property_reviews ON properties.id = property_reviews.property_id
+
   `;
 
-  const values = [limit];
+  // 1. Construct query depending on owner_id and city.
+  if (options.owner_id && options.city) {
+    // owner_id, city passed in
+    queryParams.push(options.owner_id);
+    queryString += `WHERE properties.owner_id = $${queryParams.length} `;
+
+    queryParams.push(`%${options.city}%`);
+    queryString += `AND properties.city LIKE $${queryParams.length} `;
+  } else if (options.owner_id && !options.city) {
+    // owner_id passed in
+    queryParams.push(options.owner_id);
+    queryString += `WHERE properties.owner_id = $${queryParams.length} `;
+  } else if (!options.owner_id && options.city) {
+    // city passed in
+    queryParams.push(`%${options.city}%`);
+    queryString += `WHERE properties.city LIKE $${queryParams.length} `;
+  }
+
+  // 2. Construct query depending on minimum_price_per_night and maximum_price_per_night
+
+  // 2.a) Query accounts for owner_id or city
+  if (options.owner_id || options.city) {
+    if (options.minimum_price_per_night && options.maximum_price_per_night) {
+      // minimum_price_per_night, maximum_price_per_night passed in
+      queryParams.push(options.minimum_price_per_night);
+      queryString += `AND properties.cost_per_night BETWEEN $${queryParams.length} `;
+
+      queryParams.push(options.maximum_price_per_night);
+      queryString += `AND $${queryParams.length} `;
+    } else if (options.minimum_price_per_night && !options.maximum_price_per_night) {
+      // minimum_price_per_night passed in
+      queryParams.push(options.minimum_price_per_night);
+      queryString += `AND properties.cost_per_night >= $${queryParams.length} `;
+    } else if (!options.minimum_price_per_night && options.maximum_price_per_night) {
+      // maximum_price_per_night passed in
+      queryParams.push(options.maximum_price_per_night);
+      queryString += `AND properties.cost_per_night <= $${queryParams.length} `;
+    }
+  }
+
+  // 2.b) Query does not account for owner_id and city
+  if (!options.owner_id && !options.city) {
+    if (options.minimum_price_per_night && options.maximum_price_per_night) {
+      // minimum_price_per_night, maximum_price_per_night passed in
+      queryParams.push(options.minimum_price_per_night * 100);
+      queryString += `WHERE properties.cost_per_night BETWEEN $${queryParams.length} `;
+
+      queryParams.push(options.maximum_price_per_night * 100);
+      queryString += `AND $${queryParams.length} `;
+    } else if (options.minimum_price_per_night && !options.maximum_price_per_night) {
+      // minimum_price_per_night passed in
+      queryParams.push(options.minimum_price_per_night * 100);
+      queryString += `WHERE properties.cost_per_night >= $${queryParams.length} `;
+    } else if (!options.minimum_price_per_night && options.maximum_price_per_night) {
+      // maximum_price_per_night passed in
+      queryParams.push(options.maximum_price_per_night * 100);
+      queryString += `WHERE properties.cost_per_night <= $${queryParams.length} `;
+    }
+  }
+
+  // 3. Add GROUP BY to query
+  queryString += `
+  GROUP BY properties.id
+  `;
+
+  // 4. Construct query depending on minimum_rating
+  if (options.minimum_rating) {
+    // minimum_rating passed in
+    queryParams.push(options.minimum_rating);
+    queryString += `HAVING AVG(property_reviews.rating) >= $${queryParams.length} `;
+  }
+
+  // 5. Conclude construction of query
+  queryParams.push(limit);
+  queryString += `
+  ORDER BY properties.cost_per_night
+  LIMIT $${queryParams.length};
+  `;
 
   return pool
-    .query(queryString, values)
+    .query(queryString, queryParams)
     .then(res => res.rows)
     .catch(err => console.log(err.message));
 };
 exports.getAllProperties = getAllProperties;
-
 
 /**
  * Add a property to the database
